@@ -27,25 +27,117 @@ debugger_running() {
     systemctl --user is-active --quiet "$UNIT.service"
 }
 
+miniapp_connected() {
+    ss -tnH 2>/dev/null | awk '$1 == "ESTAB" && ($4 ~ /:9421$/ || $5 ~ /:9421$/) { found=1 } END { exit !found }'
+}
+
+find_wmpf_runtime() {
+    local wechat_pid
+
+    wechat_pid="$(pgrep -xo wechat 2>/dev/null || true)"
+    [ -n "$wechat_pid" ] || return 1
+
+    ps --ppid "$wechat_pid" -o pid=,stat=,comm= | awk '$3 == "WeChatAppEx" && $2 !~ /^Z/ { print $1; exit }'
+}
+
+rebuild_wmpf_runtime() {
+    local old_pid new_pid stable_pid="" stable_count=0
+
+    old_pid="$(find_wmpf_runtime)"
+    if [ -z "$old_pid" ]; then
+        echo "找不到正在运行的 WMPF Runtime。"
+        return 1
+    fi
+
+    echo "准备重建 WMPF Runtime：PID=$old_pid"
+
+    if ! kill -TERM "$old_pid"; then
+        echo "无法停止 WMPF Runtime：PID=$old_pid"
+        return 1
+    fi
+
+    for _ in $(seq 1 60); do
+        new_pid="$(find_wmpf_runtime)"
+
+        if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ]; then
+            if [ "$new_pid" = "$stable_pid" ]; then
+                stable_count=$((stable_count + 1))
+            else
+                stable_pid="$new_pid"
+                stable_count=1
+            fi
+
+            if [ "$stable_count" -ge 4 ]; then
+                echo "WMPF Runtime 已重建：$old_pid -> $new_pid"
+                return 0
+            fi
+        else
+            stable_pid=""
+            stable_count=0
+        fi
+
+        sleep 0.25
+    done
+
+    echo "等待新的稳定 WMPF Runtime 超时。"
+    return 1
+}
+
 # 已经运行时直接复用
 if ports_ready && debugger_running; then
     echo "WMPFDebugger 已经运行。"
     echo
     echo "62000 : READY"
-    echo "9421  : READY"
-    echo
-    echo "========================================"
-    echo "采集环境已就绪"
-    echo
-    echo "下一步："
-    echo "1. 在微信中打开一个普通小程序"
-    echo "2. 保持小程序调试会话"
-    echo "3. 打开视频号"
-    echo "4. 双击「保存当前视频号视频」"
-    echo "========================================"
-    echo
-    read -rp "按回车键关闭窗口..."
-    exit 0
+    if miniapp_connected; then
+        echo "9421  : CONNECTED"
+        echo
+        echo "========================================"
+        echo "采集环境已就绪"
+        echo
+        echo "下一步："
+        echo "1. 保持当前小程序调试会话"
+        echo "2. 打开视频号"
+        echo "3. 双击「保存当前视频号视频」"
+        echo "========================================"
+        echo
+        read -rp "按回车键关闭窗口..."
+        exit 0
+    else
+        echo "9421  : LISTENING / NO MINIAPP SESSION"
+        echo
+        echo "========================================"
+        echo "调试器已运行，但小程序调试会话尚未建立"
+        echo
+        echo "请先在微信中打开一个普通小程序。"
+        echo
+        echo "如果已经打开普通小程序仍然没有连接，"
+        echo "输入 r 可重建 WMPF Runtime 并重新挂载调试器。"
+        echo "直接按回车则保持现状退出。"
+        echo "========================================"
+        echo
+
+        read -rp "选择 [r/回车]：" recovery
+
+        if [ "$recovery" != "r" ] && [ "$recovery" != "R" ]; then
+            exit 0
+        fi
+
+        echo
+        echo "停止当前 WMPFDebugger..."
+        systemctl --user stop "$UNIT.service" 2>/dev/null || true
+        sleep 1
+
+        if ! rebuild_wmpf_runtime; then
+            echo
+            echo "WMPF Runtime 重建失败。"
+            read -rp "按回车键关闭窗口..."
+            exit 1
+        fi
+
+        echo
+        echo "Runtime 已重建，准备重新挂载 WMPFDebugger..."
+        echo
+    fi
 fi
 
 ORIGINAL_PTRACE="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)"
@@ -159,17 +251,29 @@ echo
 
 if ports_ready; then
     echo "62000 : READY"
-    echo "9421  : READY"
-    echo
-    echo "========================================"
-    echo "采集环境已就绪"
-    echo
-    echo "现在请："
-    echo "1. 在微信里打开一个普通小程序"
-    echo "2. 等待调试会话建立"
-    echo "3. 再进入视频号"
-    echo "4. 双击「保存当前视频号视频」"
-    echo "========================================"
+    if miniapp_connected; then
+        echo "9421  : CONNECTED"
+        echo
+        echo "========================================"
+        echo "采集环境已就绪"
+        echo
+        echo "现在请："
+        echo "1. 保持当前小程序调试会话"
+        echo "2. 再进入视频号"
+        echo "3. 双击「保存当前视频号视频」"
+        echo "========================================"
+    else
+        echo "9421  : LISTENING / WAITING FOR MINIAPP"
+        echo
+        echo "========================================"
+        echo "WMPFDebugger 已启动，正在等待小程序调试连接"
+        echo
+        echo "现在请："
+        echo "1. 在微信里打开一个普通小程序"
+        echo "2. 等待 9421 建立调试连接"
+        echo "3. 再进入视频号"
+        echo "========================================"
+    fi
 else
     echo "端口检查失败。"
     echo

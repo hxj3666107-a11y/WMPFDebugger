@@ -1,4 +1,5 @@
 #!/bin/bash
+export PATH="$HOME/.local/node-v24.20.0/bin:$PATH"
 
 cd /home/huang-justin/WMPFDebugger-linux || exit 1
 
